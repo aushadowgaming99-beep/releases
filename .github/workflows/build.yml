@@ -1,39 +1,70 @@
-name: Build JSON
+name: Build Signed Android AAB
 
 on:
   push:
-    branches:
-      - main
-  schedule:
-    # * is a special character in YAML so you have to quote this string
-    - cron:  '0 * * * *'
+    branches: [ "main", "master" ]
+  workflow_dispatch:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up Python 3.12
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.12'
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install PyGithub
-    - name: Run script and commit changes
-      run: |
-        python release.py
-        echo "Setting up git credentials..."
-        git remote set-url origin https://x-access-token:"$GITHUB_TOKEN"@github.com/"$GITHUB_REPOSITORY".git
-        git config --global user.email "actions@github.com"
-        git config --global user.name "actions"
-        echo "Git credentials configured."
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-        git checkout main
-        git add .
-        git commit -m "Automatic update of data" && git push --set-upstream origin main || true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Setup Java JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Generate Keystore in Cloud
+        run: |
+          keytool -genkeypair -v \
+            -keystore release.keystore \
+            -alias "${{ secrets.KEY_ALIAS }}" \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass "${{ secrets.KEYSTORE_PASSWORD }}" \
+            -keypass "${{ secrets.KEY_PASSWORD }}" \
+            -dname "CN=Developer, OU=App, O=Company, L=City, S=State, C=US"
+
+      - name: Build and Sign AAB via Cordova
+        run: |
+          npm install -g cordova
+          cordova create build_app com.example.myapp "My App"
+          
+          # Copy web files into Cordova build folder
+          rm -rf build_app/www/*
+          cp -r $(ls -A | grep -v '^build_app$' | grep -v '^\.git$' | grep -v '^release\.keystore$') build_app/www/
+          
+          cd build_app
+          cordova platform add android
+          
+          # Build signed release AAB
+          cordova build android --release -- --appx \
+            --keystore="../release.keystore" \
+            --storePassword="${{ secrets.KEYSTORE_PASSWORD }}" \
+            --alias="${{ secrets.KEY_ALIAS }}" \
+            --password="${{ secrets.KEY_PASSWORD }}" \
+            --packageType=bundle
+
+      - name: Upload Signed AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-signed-aab
+          path: build_app/platforms/android/app/build/outputs/bundle/release/app-release.aab
+
+      - name: Upload Keystore Backup (Important!)
+        uses: actions/upload-artifact@v4
+        with:
+          name: my-release-keystore-backup
+          path: release.keystore
